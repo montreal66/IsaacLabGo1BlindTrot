@@ -45,5 +45,7 @@ class UnitreeGo1FlatPPORunnerCfg(UnitreeGo1RoughPPORunnerCfg):
 
         self.max_iterations = 300
         self.experiment_name = "unitree_go1_flat"
-        self.policy.actor_hidden_dims = [128, 128, 128]
-        self.policy.critic_hidden_dims = [128, 128, 128]
+        # Keep the rough-policy architecture so this 48-D flat checkpoint can initialize
+        # the 48-D actor and critic of the symmetric blind rough task without shape mismatch.
+        self.policy.actor_hidden_dims = [512, 256, 128]
+        self.policy.critic_hidden_dims = [512, 256, 128]

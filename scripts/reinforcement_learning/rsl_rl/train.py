@@ -28,6 +28,12 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument(
+    "--resume_from",
+    type=str,
+    default=None,
+    help="Absolute/local checkpoint path to load before training, without changing the new run's log directory.",
+)
+parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
@@ -93,12 +99,36 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_yaml
+from isaaclab.utils.assets import retrieve_file_path
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
+
+
+class OnPolicyRunnerWithTensorboardOnlyTerrainDistribution(OnPolicyRunner):
+    """Keep terrain-distribution scalars in TensorBoard without expanding the terminal summary."""
+
+    _TERRAIN_DISTRIBUTION_PREFIX = "Curriculum/terrain_distribution/"
+
+    def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
+        terrain_values: dict[str, list[torch.Tensor]] = {}
+        for ep_info in locs["ep_infos"]:
+            for key in list(ep_info):
+                if not key.startswith(self._TERRAIN_DISTRIBUTION_PREFIX):
+                    continue
+                value = ep_info.pop(key)
+                if not isinstance(value, torch.Tensor):
+                    value = torch.tensor(value, device=self.device)
+                terrain_values.setdefault(key, []).append(value.reshape(-1).to(self.device, dtype=torch.float))
+
+        for key, values in terrain_values.items():
+            self.writer.add_scalar(key, torch.mean(torch.cat(values)), locs["it"])
+
+        super().log(locs, width=width, pad=pad)
+
 
 # import logger
 logger = logging.getLogger(__name__)
@@ -174,7 +204,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = multi_agent_to_single_agent(env)
 
     # save resume path before creating a new log_dir
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+    if args_cli.resume_from is not None:
+        resume_path = retrieve_file_path(args_cli.resume_from)
+    elif agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     # wrap for video recording
@@ -196,7 +228,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create runner from rsl-rl
     if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        runner = OnPolicyRunnerWithTensorboardOnlyTerrainDistribution(
+            env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device
+        )
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     else:
@@ -204,7 +238,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+    if args_cli.resume_from is not None or agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)

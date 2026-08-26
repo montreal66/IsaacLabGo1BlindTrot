@@ -54,3 +54,40 @@ def terrain_levels_vel(
     terrain.update_env_origins(env_ids, move_up, move_down)
     # return the mean terrain level
     return torch.mean(terrain.terrain_levels.float())
+
+
+def terrain_level_distribution(env: ManagerBasedRLEnv, env_ids: Sequence[int]) -> dict[str, torch.Tensor]:
+    """Report the current number of environments at every terrain-type and curriculum-level pair.
+
+    This term deliberately does not update the curriculum.  It is intended to be used directly after
+    :func:`terrain_levels_vel`, which updates the levels for environments that have just reset.  The returned
+    dictionary is expanded into individual TensorBoard scalars by :class:`CurriculumManager`.
+    """
+    del env_ids
+
+    terrain: TerrainImporter = env.scene.terrain
+    terrain_generator = terrain.cfg.terrain_generator
+    if terrain_generator is None or terrain.terrain_origins is None:
+        return {}
+
+    # ``terrain_types`` stores a curriculum-grid column, not a sub-terrain index.  Recreate the same column-to-type
+    # assignment used by TerrainGenerator._generate_curriculum_terrains().
+    terrain_names = list(terrain_generator.sub_terrains)
+    proportions = torch.tensor(
+        [sub_terrain.proportion for sub_terrain in terrain_generator.sub_terrains.values()],
+        device=terrain.device,
+        dtype=torch.float,
+    )
+    proportions = torch.cumsum(proportions / proportions.sum(), dim=0)
+    column_positions = torch.arange(terrain_generator.num_cols, device=terrain.device, dtype=torch.float)
+    column_positions = column_positions / terrain_generator.num_cols + 0.001
+    column_to_type = torch.searchsorted(proportions, column_positions, right=True)
+
+    stats: dict[str, torch.Tensor] = {}
+    for terrain_index, terrain_name in enumerate(terrain_names):
+        type_mask = column_to_type[terrain.terrain_types] == terrain_index
+        for level in range(terrain.max_terrain_level):
+            stats[f"{terrain_name}/level_{level}"] = torch.count_nonzero(
+                type_mask & (terrain.terrain_levels == level)
+            )
+    return stats
